@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teacher Task Master (Portable)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- SheetJS for Excel Export -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    
+    <style>
+        /* Hide scrollbar for task tabs but allow scrolling */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased font-sans min-h-screen p-4 md:p-8">
+
+    <div class="mx-auto w-full">
+        <!-- Header -->
+        <header class="mb-8 flex flex-col md:flex-row items-center justify-between gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800 tracking-tight" data-i18n="app.title">Teacher Task Master</h1>
+                <p class="text-slate-500 mt-1" data-i18n="app.subtitle">Portable Edition</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <div id="active-class-badge" class="hidden bg-blue-100 text-blue-800 px-4 py-2 rounded-full font-semibold text-sm">
+                    <!-- Injected via JS -->
+                </div>
+                <button id="language-toggle" class="bg-gray-200 text-gray-800 px-3 py-2 rounded-full text-sm font-semibold hover:bg-gray-300 transition-colors">
+                    中文
+                </button>
+                <button id="help-button" class="text-gray-600 hover:text-gray-800 p-2 rounded-full transition-colors" title="查看教程">
+                    <i data-lucide="help-circle" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <div id="app-container" class="space-y-4">
+            <!-- Sections will be injected here by JavaScript -->
+        </div>
+
+        <footer class="mt-12 text-center text-slate-400 text-sm">
+            <p>Guangdong Country Garden School Primary Section Teacher Task Master &copy; <span id="year"></span></p>
+        </footer>
+    </div>
+
+    <!-- Hidden Input for JSON Load Fallback -->
+    <input type="file" id="input-json-load" accept=".json" class="hidden" onchange="handleJSONFileSelect(this.files[0])">
+
+    <!-- JavaScript Application Logic -->
+    <script>
+        // --- CONSTANTS & CONFIG ---
+        const GRADE_CONFIG = {
+            'N/A': { bg: 'bg-gray-200', text: 'text-black', label: 'N/A', fullLabel: 'Not Started' },
+            'E': { bg: 'bg-green-800', text: 'text-white', label: 'E', fullLabel: 'Excellent' },
+            'G': { bg: 'bg-blue-800', text: 'text-white', label: 'G', fullLabel: 'Good' },
+            'Q': { bg: 'bg-yellow-400', text: 'text-black', label: 'Q', fullLabel: 'Qualified' },
+            'D': { bg: 'bg-red-600', text: 'text-white', label: 'D', fullLabel: 'Developing' }
+        };
+
+        const GRADE_CYCLE = ['N/A', 'E', 'G', 'Q', 'D'];
+
+        // --- STATE MANAGEMENT ---
+        const initialState = {
+            classes: [], // Array of ClassGroup objects
+            currentClassId: null,
+            activeTaskId: null, // For Section C
+            openSections: {
+                A: true, // Open settings by default so user sees load button
+                B: false,
+                C: true,
+                D: true
+            },
+            language: 'en' // Default language
+        };
+
+        let state = { ...initialState };
+        let fileHandle = null; // For File System Access API
+
+        // --- UTILS ---
+        function generateId() {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2);
+        }
+
+        function getNextGrade(current) {
+            const idx = GRADE_CYCLE.indexOf(current);
+            const nextIdx = (idx + 1) % GRADE_CYCLE.length;
+            return GRADE_CYCLE[nextIdx];
+        }
+
+        // --- DATA PERSISTENCE ---
+        function loadData() {
+            const saved = localStorage.getItem('teacherTaskMasterData_Local');
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    state.classes = parsed;
+                    if (state.classes.length > 0 && !state.currentClassId) {
+                        state.currentClassId = state.classes[0].id;
+                    }
+                } catch (e) {
+                    console.error("Data load error", e);
+                }
+            }
+            
+            // Load language preference
+            const savedLanguage = localStorage.getItem('teacherTaskMasterLanguage');
+            if (savedLanguage) {
+                state.language = savedLanguage;
+            }
+        }
+
+        async function saveData() {
+            // 1. Save to LocalStorage (Always)
+            const dataStr = JSON.stringify(state.classes);
+            localStorage.setItem('teacherTaskMasterData_Local', dataStr);
+            
+            // Save language preference
+            localStorage.setItem('teacherTaskMasterLanguage', state.language);
+            
+            let message = state.language === 'zh' ? "数据已保存到浏览器缓存！" : "Data Saved to Browser Cache!";
+
+            // 2. Try to save to File if handle exists
+            if (fileHandle) {
+                try {
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(JSON.stringify(state.classes, null, 2));
+                    await writable.close();
+                    message = state.language === 'zh' ? "数据已保存到文件和缓存！" : "Data Saved to File & Cache!";
+                } catch (err) {
+                    console.error("File write error:", err);
+                    message = state.language === 'zh' ? "已保存到缓存。文件写入失败（需要权限？）" : "Saved to Cache. File write failed (permission needed?).";
+                }
+            }
+
+            showToast(message);
+        }
+
+        function showToast(message) {
+            const toast = document.createElement('div');
+            toast.className = "fixed bottom-4 right-4 bg-slate-800 text-white px-6 py-3 rounded-lg shadow-lg z-50";
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 2500);
+        }
+
+        // --- JSON FILE HANDLING ---
+        async function saveToJSON() {
+            const dataStr = JSON.stringify(state.classes, null, 2);
+            
+            // Try Modern File System Access API
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: 'teacher_data.json',
+                        types: [{ description: 'JSON File', accept: {'application/json': ['.json']} }],
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(dataStr);
+                    await writable.close();
+                    fileHandle = handle; // Store handle for future Ctrl+S
+                    showToast("File Saved & Linked for auto-save!");
+                    render(); // Re-render to show linked status
+                    return;
+                } catch (err) {
+                    if (err.name !== 'AbortError') console.error(err);
+                    // Fallback to download if user cancels or API fails
+                }
+            }
+
+            // Fallback: Download method
+            const blob = new Blob([dataStr], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'teacher_data.json';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast("Data downloaded as teacher_data.json");
+        }
+
+        async function loadFromJSON() {
+            // Try Modern File System Access API
+            if (window.showOpenFilePicker) {
+                try {
+                    const [handle] = await window.showOpenFilePicker({
+                        types: [{ description: 'JSON File', accept: {'application/json': ['.json']} }],
+                        multiple: false
+                    });
+                    const file = await handle.getFile();
+                    const text = await file.text();
+                    processJSONLoad(text);
+                    fileHandle = handle; // Store handle
+                    showToast("File Loaded & Linked!");
+                    return;
+                } catch (err) {
+                    if (err.name !== 'AbortError') console.error(err);
+                    // Fallback handled below if API fails (though usually we just stop here if user cancels)
+                }
+            }
+            
+            // Fallback: Trigger hidden input
+            document.getElementById('input-json-load').click();
+        }
+
+        // Fallback file input handler
+        function handleJSONFileSelect(file) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => processJSONLoad(e.target.result);
+            reader.readAsText(file);
+            // Note: Cannot get persistent fileHandle from input[type=file]
+            fileHandle = null; 
+        }
+
+        function processJSONLoad(jsonStr) {
+            try {
+                const data = JSON.parse(jsonStr);
+                if (Array.isArray(data)) {
+                    state.classes = data;
+                    state.currentClassId = data.length > 0 ? data[0].id : null;
+                    // Also save to LS immediately
+                    localStorage.setItem('teacherTaskMasterData_Local', JSON.stringify(state.classes));
+                    render();
+                } else {
+                    alert("Invalid JSON format: Root must be an array.");
+                }
+            } catch (e) {
+                alert("Error parsing JSON file.");
+            }
+        }
+
+        // --- ACTIONS (Controller) ---
+        const actions = {
+            toggleSection: (sectionId) => {
+                state.openSections[sectionId] = !state.openSections[sectionId];
+                render();
+            },
+            addClass: (name) => {
+                if(!name.trim()) return;
+                const newClass = {
+                    id: generateId(),
+                    name: name,
+                    students: [],
+                    tasks: []
+                };
+                state.classes.push(newClass);
+                state.currentClassId = newClass.id;
+                state.openSections.B = true; 
+                saveData();
+                render();
+            },
+            selectClass: (id) => {
+                state.currentClassId = id;
+                state.activeTaskId = null;
+                render();
+            },
+            importStudents: (file) => {
+                if(!state.currentClassId || !file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    const names = text.split(/[,\n]/).map(n => n.trim()).filter(n => n.length > 0);
+                    
+                    const cls = state.classes.find(c => c.id === state.currentClassId);
+                    if(cls) {
+                        const newStudents = names.map(name => ({
+                            id: generateId(),
+                            name: name,
+                            grades: {}
+                        }));
+                        
+                        newStudents.forEach(s => {
+                            cls.tasks.forEach(t => {
+                                s.grades[t.id] = 'N/A';
+                            });
+                        });
+
+                        cls.students.push(...newStudents);
+                        saveData();
+                        render();
+                        showToast(t('toast.students_imported').replace('{{count}}', newStudents.length));
+                    }
+                };
+                reader.readAsText(file);
+            },
+            addTask: (name) => {
+                if(!state.currentClassId || !name.trim()) return;
+                const cls = state.classes.find(c => c.id === state.currentClassId);
+                if(cls) {
+                    const newTask = {
+                        id: generateId(),
+                        name: name,
+                        createdAt: Date.now()
+                    };
+                    cls.tasks.push(newTask);
+                    cls.students.forEach(s => {
+                        s.grades[newTask.id] = 'N/A';
+                    });
+                    state.activeTaskId = newTask.id;
+                    saveData();
+                    render();
+                }
+            },
+            updateGrade: (studentId, taskId) => {
+                const cls = state.classes.find(c => c.id === state.currentClassId);
+                if(!cls) return;
+                const student = cls.students.find(s => s.id === studentId);
+                if(!student) return;
+
+                const currentGrade = student.grades[taskId] || 'N/A';
+                const nextGrade = getNextGrade(currentGrade);
+                student.grades[taskId] = nextGrade;
+                
+                saveData();
+                render(); 
+            },
+            deleteTask: (taskId) => {
+                if(!confirm(t('confirm.delete_task'))) return;
+                const cls = state.classes.find(c => c.id === state.currentClassId);
+                if(!cls) return;
+                
+                cls.tasks = cls.tasks.filter(t => t.id !== taskId);
+                cls.students.forEach(s => {
+                    if(s.grades[taskId]) delete s.grades[taskId];
+                });
+
+                if(state.activeTaskId === taskId) state.activeTaskId = null;
+                saveData();
+                render();
+            },
+            setActiveTask: (taskId) => {
+                state.activeTaskId = taskId;
+                render();
+            },
+            exportXLSX: () => {
+                const cls = state.classes.find(c => c.id === state.currentClassId);
+                if(!cls) return;
+
+                const header = [t('section.a.export_excel.class_label').replace(':', ''), ...cls.tasks.map(t => t.name)];
+                const data = cls.students.map(s => {
+                    return [s.name, ...cls.tasks.map(t => s.grades[t.id] || t('grade.NA.label'))];
+                });
+
+                const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "Class Data");
+                XLSX.writeFile(wb, `${cls.name}_Report.xlsx`);
+            },
+            toggleLanguage: () => {
+                state.language = state.language === 'en' ? 'zh' : 'en';
+                saveData();
+                render();
+                applyTranslations(); // 添加这行以在切换语言后立即应用翻译
+            }
+        };
+
+        // --- RENDER FUNCTIONS ---
+        
+        function createSectionHTML(id, title, iconName, contentHTML) {
+            const isOpen = state.openSections[id];
+            // Define color classes for each section
+            const colorClasses = {
+                'A': 'bg-gray-200 hover:bg-gray-300',
+                'B': 'bg-blue-200 hover:bg-blue-300',
+                'C': 'bg-purple-200 hover:bg-purple-300',
+                'D': 'bg-green-200 hover:bg-green-300'
+            };
+            
+            return `
+                <div class="border border-slate-200 rounded-lg shadow-sm bg-white mb-4 overflow-hidden w-full">
+                    <button onclick="actions.toggleSection('${id}')" 
+                        class="w-full flex items-center justify-between p-4 ${colorClasses[id] || 'bg-slate-50'} focus:outline-none">
+                        <div class="flex items-center gap-3">
+                            <i data-lucide="${iconName}" class="text-slate-600"></i>
+                            <h2 class="text-lg font-semibold text-slate-800" data-section="${id}">${title}</h2>
+                        </div>
+                        <i data-lucide="${isOpen ? 'chevron-up' : 'chevron-down'}" class="w-5 h-5 text-slate-400"></i>
+                    </button>
+                    ${isOpen ? `<div class="p-4 border-t border-slate-100">${contentHTML}</div>` : ''}
+                </div>
+            `;
+        }
+
+        function renderSectionA() {
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            const importDisabled = !state.currentClassId ? 'opacity-50 pointer-events-none' : '';
+            const fileStatus = fileHandle 
+                ? `<span class="text-green-600 font-semibold text-xs ml-2 bg-green-50 px-2 py-0.5 rounded border border-green-200">${t('section.a.portable_data.linked')}${fileHandle.name}</span>` 
+                : `<span class="text-slate-400 font-normal text-xs ml-2">${t('section.a.portable_data.not_linked')}</span>`;
+            
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 1. Create Class -->
+                    <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                        <h3 class="font-semibold mb-3 text-slate-700">${t('section.a.create_class.title')}</h3>
+                        <div class="flex gap-2">
+                            <input type="text" id="input-new-class" placeholder="${t('section.a.create_class.placeholder')}" class="flex-1 p-2 border border-slate-300 rounded">
+                            <button onclick="actions.addClass(document.getElementById('input-new-class').value)" class="bg-blue-600 text-white p-2 rounded hover:bg-blue-700 flex items-center gap-2">
+                                <i data-lucide="plus" class="w-4 h-4"></i> ${t('section.a.create_class.button')}
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 2. Portable Data (JSON) -->
+                    <div class="bg-purple-50 p-4 rounded-lg border border-purple-200 relative">
+                        <h3 class="font-semibold mb-1 text-purple-900">${t('section.a.portable_data.title')} ${fileStatus}</h3>
+                        <p class="text-xs text-purple-600 mb-3">${t('section.a.portable_data.description')}</p>
+                        <div class="flex gap-3">
+                            <button onclick="loadFromJSON()" class="flex-1 bg-white text-purple-700 border border-purple-300 px-3 py-2 rounded hover:bg-purple-100 flex items-center justify-center gap-2 transition-colors">
+                                <i data-lucide="folder-open" class="w-4 h-4"></i> ${t('section.a.portable_data.load_button')}
+                            </button>
+                            <button onclick="saveToJSON()" class="flex-1 bg-purple-600 text-white px-3 py-2 rounded hover:bg-purple-700 flex items-center justify-center gap-2 shadow-sm transition-colors">
+                                <i data-lucide="save" class="w-4 h-4"></i> ${t('section.a.portable_data.save_button')}
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 3. Import Students -->
+                    <div class="bg-slate-50 p-4 rounded-lg border border-slate-200 ${importDisabled}">
+                        <h3 class="font-semibold mb-3 text-slate-700">${t('section.a.import_students.title')}</h3>
+                        <div class="flex gap-2">
+                            <input type="file" id="input-import" accept=".csv,.txt" class="flex-1 text-sm file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-blue-50 file:text-blue-700">
+                            <button onclick="actions.importStudents(document.getElementById('input-import').files[0])" class="bg-green-600 text-white px-3 py-2 rounded hover:bg-green-700 flex items-center gap-2">
+                                <i data-lucide="upload" class="w-4 h-4"></i> ${t('section.a.import_students.button')}
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 4. Excel Export -->
+                    <div class="bg-slate-50 p-4 rounded-lg border border-slate-200 ${importDisabled}">
+                        <h3 class="font-semibold mb-3 text-slate-700">${t('section.a.export_excel.title')}</h3>
+                         <div class="flex items-center justify-between">
+                            <div class="text-sm text-slate-600">${t('section.a.export_excel.class_label')} <b>${cls ? cls.name : 'None'}</b></div>
+                            <button onclick="actions.exportXLSX()" class="bg-orange-600 text-white px-4 py-2 rounded hover:bg-orange-700 flex items-center gap-2">
+                                <i data-lucide="download" class="w-4 h-4"></i> ${t('section.a.export_excel.button')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSectionB() {
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            
+            let optionsHTML = `<option value="" disabled selected>${t('section.b.select_class_placeholder')}</option>`;
+            state.classes.forEach(c => {
+                optionsHTML += `<option value="${c.id}" ${c.id === state.currentClassId ? 'selected' : ''}>${c.name}</option>`;
+            });
+
+            let tasksHTML = '';
+            if (cls) {
+                if (cls.tasks.length === 0) {
+                    tasksHTML = `<p class="text-slate-400 italic text-sm">${t('section.b.no_tasks_message')}</p>`;
+                } else {
+                    cls.tasks.forEach((t, index) => {
+                        tasksHTML += `
+                            <div class="flex items-center justify-between bg-white p-3 rounded border border-slate-200 shadow-sm mt-2 draggable-task" draggable="true" data-task-id="${t.id}" data-index="${index}">
+                                <span class="font-medium text-slate-700">${t.name}</span>
+                                <button onclick="actions.deleteTask('${t.id}')" class="text-red-500 hover:text-red-700 p-1">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        `;
+                    });
+                }
+            }
+
+            return `
+                <div class="space-y-6">
+                    <div class="flex flex-col md:flex-row gap-4 items-center">
+                        <label class="font-semibold text-slate-700">${t('section.b.current_class_label')}</label>
+                        <select onchange="actions.selectClass(this.value)" class="w-full md:w-64 p-2 border border-slate-300 rounded">
+                            ${optionsHTML}
+                        </select>
+                    </div>
+
+                    ${cls ? `
+                        <div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                            <h3 class="font-semibold mb-4 text-slate-700">${t('section.b.task_management_title')}</h3>
+                            <div class="flex gap-2 mb-6 max-w-2xl">
+                                <input type="text" id="input-new-task" placeholder="${t('section.b.new_task_placeholder')}" class="flex-1 p-2 border border-slate-300 rounded">
+                                <button onclick="actions.addTask(document.getElementById('input-new-task').value)" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 flex items-center gap-2">
+                                    <i data-lucide="plus" class="w-4 h-4"></i> ${t('section.b.create_task_button')}
+                                </button>
+                            </div>
+                            <div class="space-y-2 task-list" data-class-id="${cls.id}">
+                                ${tasksHTML}
+                            </div>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        function renderSectionC() {
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            if (!cls) return `<div class="text-slate-500 italic p-4 text-center">${t('section.c.select_class_first')}</div>`;
+            if (cls.students.length === 0) return `<div class="text-slate-500 italic p-4 text-center">${t('section.c.no_students')}</div>`;
+            if (cls.tasks.length === 0) return `<div class="text-slate-500 italic p-4 text-center">${t('section.c.no_tasks')}</div>`;
+
+            let activeTaskId = state.activeTaskId;
+            if (!activeTaskId || !cls.tasks.find(t => t.id === activeTaskId)) {
+                activeTaskId = cls.tasks[cls.tasks.length - 1].id;
+                state.activeTaskId = activeTaskId; 
+            }
+
+            const activeTask = cls.tasks.find(t => t.id === activeTaskId);
+
+            let tabsHTML = '';
+            cls.tasks.forEach((t, index) => {
+                const isActive = t.id === activeTaskId;
+                const styleClass = isActive 
+                    ? 'bg-blue-600 text-white shadow-sm' 
+                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50';
+                tabsHTML += `
+                    <button onclick="actions.setActiveTask('${t.id}')" 
+                        class="px-5 py-3 rounded-t-lg font-medium whitespace-nowrap min-w-[100px] ${styleClass} draggable-task" draggable="true" data-task-id="${t.id}" data-index="${index}">
+                        ${t.name}
+                    </button>
+                `;
+            });
+
+            let gridHTML = '';
+            cls.students.forEach(s => {
+                const grade = s.grades[activeTaskId] || 'N/A';
+                const style = GRADE_CONFIG[grade];
+                
+                gridHTML += `
+                    <button onclick="actions.updateGrade('${s.id}', '${activeTaskId}')"
+                        class="${style.bg} ${style.text} p-2 rounded-lg shadow hover:shadow-md flex flex-col items-center justify-center gap-1 border border-transparent relative group min-h-[40px]">
+                        <span class="absolute top-1 right-1 text-xs font-bold opacity-60 border border-current px-1 py-0.5 rounded">${style.label}</span>
+                        <span class="text-sm font-bold text-center leading-tight break-words w-full select-none">${s.name}</span>
+                        <span class="text-[0.5rem] uppercase opacity-80 font-semibold tracking-wider">${style.fullLabel}</span>
+                    </button>
+                `;
+            });
+
+            return `
+                <div class="space-y-6">
+                    <div class="flex flex-col gap-2">
+                        <label class="text-sm font-semibold text-slate-500 uppercase tracking-wider">${t('section.c.select_task_label')}</label>
+                        <div class="flex overflow-x-auto pb-2 gap-2 border-b border-slate-200 no-scrollbar task-list" data-class-id="${cls.id}">
+                            ${tabsHTML}
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-between items-end px-1">
+                        <div>
+                            <h3 class="text-2xl font-bold text-slate-800">${activeTask.name}</h3>
+                            <p class="text-sm text-slate-500">${t('section.c.tap_student_instruction')}</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
+                        ${gridHTML}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSectionD() {
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            if (!cls || cls.students.length === 0 || cls.tasks.length === 0) {
+                return `<div class="text-slate-500 italic p-4 text-center">${t('section.d.data_required_message')}</div>`;
+            }
+
+            let legendHTML = '';
+            Object.values(GRADE_CONFIG).forEach(style => {
+                legendHTML += `
+                    <div class="flex items-center gap-1">
+                        <div class="w-3 h-3 rounded-sm ${style.bg} border border-slate-200"></div>
+                        <span class="text-slate-600">${style.fullLabel}</span>
+                    </div>
+                `;
+            });
+
+            let headersHTML = `<div class="bg-slate-100 p-2 font-semibold text-xs text-slate-700 flex items-center justify-center border-b border-r border-slate-200">${t('section.d.student_task_header')}</div>`;
+            cls.tasks.forEach(t => {
+                headersHTML += `<div class="bg-slate-100 p-2 font-semibold text-xs text-slate-700 border-b border-slate-200 text-center truncate" title="${t.name}">${t.name.substring(0, 10)}</div>`;
+            });
+
+            let rowsHTML = '';
+            cls.students.forEach(s => {
+                rowsHTML += `<div class="p-2 text-xs font-medium text-slate-900 border-r border-b border-slate-100 bg-slate-50 truncate">${s.name}</div>`;
+                cls.tasks.forEach(t => {
+                    const grade = s.grades[t.id] || 'N/A';
+                    const style = GRADE_CONFIG[grade];
+                    rowsHTML += `<div class="h-8 w-full ${style.bg} border-b border-slate-100 border-r border-white/10 opacity-90" title="${s.name} - ${t.name}: ${style.fullLabel}"></div>`;
+                });
+            });
+
+            return `
+                <div class="overflow-x-auto">
+                    <div class="inline-block min-w-full">
+                        <div class="flex gap-4 mb-4 text-xs justify-end px-2 flex-wrap">
+                            ${legendHTML}
+                        </div>
+                        <div class="grid border border-slate-200 rounded-lg overflow-hidden bg-white shadow-sm"
+                             style="grid-template-columns: minmax(120px, auto) repeat(${cls.tasks.length}, minmax(40px, 1fr))">
+                             ${headersHTML}
+                             ${rowsHTML}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- MAIN RENDER LOOP ---
+        function render() {
+            document.getElementById('year').textContent = new Date().getFullYear();
+
+            const badge = document.getElementById('active-class-badge');
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            if (cls) {
+                badge.textContent = `${state.language === 'en' ? 'Active:' : '当前:'} ${cls.name}`;
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+            }
+
+            const container = document.getElementById('app-container');
+            container.innerHTML = `
+                ${createSectionHTML('A', t('section.a.title'), 'settings', renderSectionA())}
+                ${createSectionHTML('B', t('section.b.title'), 'check-square', renderSectionB())}
+                ${createSectionHTML('C', t('section.c.title'), 'users', renderSectionC())}
+                ${createSectionHTML('D', t('section.d.title'), 'bar-chart-2', renderSectionD())}
+            `;
+
+            lucide.createIcons();
+            applyTranslations(); // 在每次渲染后应用翻译
+        }
+
+        // --- TRANSLATIONS ---
+        const translations = {
+            en: {
+                'app.title': '教师任务管理器',
+                'app.subtitle': '便携版',
+                'section.a.title': '设置与管理',
+                'section.b.title': '班级与任务管理',
+                'section.c.title': '实时跟踪',
+                'section.d.title': '班级概览矩阵',
+                'section.a.create_class.title': '1. 创建班级',
+                'section.a.create_class.placeholder': '班级名称',
+                'section.a.create_class.button': '添加',
+                'section.a.portable_data.title': '2. 可移植数据 (JSON)',
+                'section.a.portable_data.not_linked': '未链接',
+                'section.a.portable_data.linked': '已链接: ',
+                'section.a.portable_data.description': '保存到文件，复制文件夹到USB，然后加载。',
+                'section.a.portable_data.load_button': '加载',
+                'section.a.portable_data.save_button': '保存文件',
+                'section.a.import_students.title': '3. 导入学生 (CSV)',
+                'section.a.import_students.button': '导入',
+                'section.a.export_excel.title': '4. 导出Excel',
+                'section.a.export_excel.class_label': '班级:',
+                'section.a.export_excel.button': '导出XLSX',
+                'section.b.current_class_label': '当前班级:',
+                'section.b.select_class_placeholder': '选择一个班级...',
+                'section.b.task_management_title': '任务管理',
+                'section.b.new_task_placeholder': '新任务名称',
+                'section.b.create_task_button': '创建',
+                'section.b.no_tasks_message': '尚未创建任务。',
+                'section.c.select_task_label': '选择任务',
+                'section.c.tap_student_instruction': '点击学生卡片以循环评分。',
+                'section.c.select_class_first': '请先选择一个班级。',
+                'section.c.no_students': '暂无学生。请在第一部分导入。',
+                'section.c.no_tasks': '暂无任务。请在第二部分创建。',
+                'section.d.data_required_message': '矩阵视图需要数据。',
+                'section.d.student_task_header': '学生 / 任务',
+                'toast.data_saved_cache': '数据已保存到浏览器缓存！',
+                'toast.file_saved_linked': '文件已保存并链接以自动保存！',
+                'toast.data_downloaded': '数据已下载为 teacher_data.json',
+                'toast.file_loaded_linked': '文件已加载并链接！',
+                'toast.students_imported': '已导入 {{count}} 名学生。',
+                'confirm.delete_task': '删除此任务？',
+                'grade.NA.label': 'N/A',
+                'grade.NA.fullLabel': '未开始',
+                'grade.E.label': 'E',
+                'grade.E.fullLabel': '优秀',
+                'grade.G.label': 'G',
+                'grade.G.fullLabel': '良好',
+                'grade.Q.label': 'Q',
+                'grade.Q.fullLabel': '疑问',
+                'grade.D.label': 'D',
+                'grade.D.fullLabel': '不足'
+            }
+        };
+
+        // Translation function
+        function t(key) {
+            return translations[state.language]?.[key] || translations.en[key] || key;
+        }
+
+        // Apply translations to all elements with data-i18n attribute
+        function applyTranslations() {
+            document.querySelectorAll('[data-i18n]').forEach(element => {
+                const key = element.getAttribute('data-i18n');
+                element.textContent = t(key);
+            });
+            
+            // Update placeholders separately
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(element => {
+                const key = element.getAttribute('data-i18n-placeholder');
+                element.placeholder = t(key);
+            });
+            
+            // Update section titles
+            document.querySelector('[data-section="A"] h2').textContent = t('section.a.title');
+            document.querySelector('[data-section="B"] h2').textContent = t('section.b.title');
+            document.querySelector('[data-section="C"] h2').textContent = t('section.c.title');
+            document.querySelector('[data-section="D"] h2').textContent = t('section.d.title');
+            
+            // Update specific elements that need special handling
+            const cls = state.classes.find(c => c.id === state.currentClassId);
+            
+            // Update language toggle button text
+            const languageToggle = document.getElementById('language-toggle');
+            if (languageToggle) {
+                languageToggle.textContent = state.language === 'en' ? '中文' : 'English';
+            }
+            
+            // Update class badge
+            const badge = document.getElementById('active-class-badge');
+            if (badge && cls) {
+                badge.textContent = `${state.language === 'en' ? 'Active:' : '当前:'} ${cls.name}`;
+            }
+            
+            // Update file status text
+            if (fileHandle) {
+                const fileStatusElement = document.querySelector('.file-status-text');
+                if (fileStatusElement) {
+                    fileStatusElement.textContent = `${t('section.a.portable_data.linked')}${fileHandle.name}`;
+                }
+            }
+        }
+
+        // --- INITIALIZATION ---
+        document.addEventListener('DOMContentLoaded', () => {
+            loadData();
+            render();
+            applyTranslations(); // 应用初始翻译
+
+            // Help button functionality
+            const helpButton = document.getElementById('help-button');
+            if (helpButton) {
+                helpButton.addEventListener('click', () => {
+                    showHelpModal();
+                });
+            }
+
+            // Keyboard shortcut for saving
+            document.addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                    e.preventDefault();
+                    saveData();
+                }
+            });
+
+            // Setup drag and drop event listeners
+            setupDragAndDrop();
+        });
+
+        function setupDragAndDrop() {
+            // Using event delegation for dynamically created elements
+            document.addEventListener('dragstart', handleDragStart);
+            document.addEventListener('dragover', handleDragOver);
+            document.addEventListener('dragenter', handleDragEnter);
+            document.addEventListener('dragleave', handleDragLeave);
+            document.addEventListener('drop', handleDrop);
+            document.addEventListener('dragend', handleDragEnd);
+        }
+
+        let dragSrcElement = null;
+
+        function handleDragStart(e) {
+            // Check if the dragged element has the draggable-task class
+            if (!e.target.classList.contains('draggable-task')) {
+                return;
+            }
+
+            dragSrcElement = e.target;
+            e.target.classList.add('opacity-50');
+            e.dataTransfer.effectAllowed = 'move';
+            // Store the task ID in the transfer data
+            e.dataTransfer.setData('text/plain', e.target.getAttribute('data-task-id'));
+        }
+
+        function handleDragOver(e) {
+            if (e.preventDefault) {
+                e.preventDefault();
+            }
+            e.dataTransfer.dropEffect = 'move';
+            return false;
+        }
+
+        function handleDragEnter(e) {
+            // Add visual feedback when dragging over a drop zone
+            const dropZone = e.target.closest('.task-list');
+            if (dropZone) {
+                dropZone.classList.add('bg-blue-50');
+            }
+            
+            // Also highlight draggable items when hovering over them
+            if (e.target.classList.contains('draggable-task') && e.target !== dragSrcElement) {
+                e.target.classList.add('bg-blue-100');
+            }
+        }
+
+        function handleDragLeave(e) {
+            // Remove visual feedback when leaving a drop zone
+            const dropZone = e.target.closest('.task-list');
+            if (dropZone) {
+                dropZone.classList.remove('bg-blue-50');
+            }
+            
+            // Remove highlight from draggable items
+            if (e.target.classList.contains('draggable-task') && e.target !== dragSrcElement) {
+                e.target.classList.remove('bg-blue-100');
+            }
+        }
+
+        function handleDrop(e) {
+            if (e.stopPropagation) {
+                e.stopPropagation();
+            }
+
+            // Remove all visual feedback
+            document.querySelectorAll('.task-list').forEach(el => {
+                el.classList.remove('bg-blue-50');
+            });
+            document.querySelectorAll('.draggable-task').forEach(el => {
+                el.classList.remove('bg-blue-100');
+            });
+
+            const dropZone = e.target.closest('.task-list');
+            if (!dropZone || !dragSrcElement) {
+                return;
+            }
+
+            // Get class ID and task ID
+            const classId = dropZone.getAttribute('data-class-id');
+            const taskId = e.dataTransfer.getData('text/plain');
+
+            // Find the class in the state
+            const cls = state.classes.find(c => c.id === classId);
+            if (!cls || !taskId) {
+                return;
+            }
+
+            // Find the drop target element
+            let dropTarget = e.target.closest('.draggable-task');
+            if (dropTarget === dragSrcElement) {
+                dropTarget = null;
+            }
+
+            // Reorder tasks in the state
+            const taskIndex = cls.tasks.findIndex(t => t.id === taskId);
+            if (taskIndex !== -1) {
+                const [movedTask] = cls.tasks.splice(taskIndex, 1);
+                
+                // Determine the new position
+                let newIndex = cls.tasks.length; // Default to end
+                if (dropTarget) {
+                    const targetTaskId = dropTarget.getAttribute('data-task-id');
+                    newIndex = cls.tasks.findIndex(t => t.id === targetTaskId);
+                    // If dropping after the target, increment index
+                    if (newIndex < taskIndex) {
+                        newIndex++;
+                    }
+                }
+                
+                // Insert at the new position
+                cls.tasks.splice(newIndex, 0, movedTask);
+                
+                // Save and re-render
+                saveData();
+                render();
+            }
+
+            return false;
+        }
+
+        function handleDragEnd(e) {
+            // Reset all draggable elements
+            document.querySelectorAll('.draggable-task').forEach(el => {
+                el.classList.remove('opacity-50', 'bg-blue-100');
+            });
+            
+            // Reset all drop zones
+            document.querySelectorAll('.task-list').forEach(el => {
+                el.classList.remove('bg-blue-50');
+            });
+            
+            dragSrcElement = null;
+        }
+
+        // Setup drag and drop when DOM is loaded
+        document.addEventListener('DOMContentLoaded', setupDragAndDrop);
+    </script>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
